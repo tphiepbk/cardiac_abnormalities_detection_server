@@ -8,8 +8,8 @@ def hello_world():
 
 @app.route('/test')
 def predict():
-    reponse = jsonify({'code' : 200, 'data' : 'hello world'})
-    return 'Hello, World!'
+    response = jsonify({'code' : 200, 'data' : 'hello world'})
+    return response
 
 
 if __name__ == '__main__':
