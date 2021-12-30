@@ -8,26 +8,14 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLRO
 from tensorflow.keras import backend as K
 from tensorflow.keras.regularizers import l2
 
-import os
 import numpy as np
-import pandas as pd
-import glob
-import matplotlib.pyplot as plt
-import seaborn as sn
-import random
 
 import cv2
-from google.colab.patches import cv2_imshow
-
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, classification_report
 
 NUM_FEATURES = 512
 MAX_FRAMES = 30
 MAX_SLICES = 12
 IMG_SIZE = 160
-
-"""# Prepare"""
 
 def dice_coef(y_true, y_pred, num_classes=4):
     y_true = K.one_hot(K.cast(y_true, 'int32'), num_classes=num_classes)[...,1:]
@@ -54,7 +42,6 @@ def padding_layer(pre_layer, base_layer):
     return ZeroPadding2D((a, b), data_format = "channels_last")(pre_layer)
 
 def unet(pretrained_weights = None, input_size = (IMG_SIZE,IMG_SIZE,1)):
-    
     inputs = Input(input_size, name='input')
     conv1 = Conv2D(32, 3, activation = 'relu', padding = 'same', name = 'conv1_0')(inputs)
     conv1 = Conv2D(32, 3, activation = 'relu', padding = 'same', name = 'conv1_1')(conv1)
@@ -105,24 +92,22 @@ def unet(pretrained_weights = None, input_size = (IMG_SIZE,IMG_SIZE,1)):
     conv9 = Conv2D(32, 3, activation = 'relu', padding = 'same', name = 'conv9_1')(conv9)
 
     conv10 = Conv2D(4, 1, activation = 'softmax', name = 'conv10')(conv9)
-    #out = tf.nn.softmax(conv10, axis=-1)
 
     model = Model(inputs = inputs, outputs = conv10, name = 'unet')
 
     model.compile(optimizer = Adam(learning_rate = 1e-4), loss = dice_coef_loss, metrics = ['accuracy', dice_coef])
 
     if(pretrained_weights):
-    	model.load_weights(pretrained_weights)
+        model.load_weights(pretrained_weights)
 
     return model
-
-!gdown --id 1KgDMRHddJgseefQluGiOavVx2TESf0Ck
-
-unet_model = unet(pretrained_weights='unet3.h5')
 
 """# Model"""
 
 def build_feature_extractor():
+
+    unet_model = unet(pretrained_weights='./pretrained_model/unet3.h5')
+
     unet_encoder = Model(inputs = unet_model.inputs, outputs = unet_model.get_layer('conv5_1').output, name='unet_encoder')
     unet_encoder.trainable = False
     
@@ -132,101 +117,95 @@ def build_feature_extractor():
     x = Flatten()(x)
     x = Dropout(0.5)(x)
     outputs = Dense(NUM_FEATURES, activation='relu')(x)
-   
+
     return keras.Model(inputs, outputs, name="feature_extractor"), unet_encoder
 
-feature_extractor, unet_encoder = build_feature_extractor()
+def predict():
 
-frame_inputs = Input((MAX_FRAMES, IMG_SIZE, IMG_SIZE, 1))
-masked_inputs = Masking(mask_value=0)(frame_inputs)
+    feature_extractor, unet_encoder = build_feature_extractor()
 
-features = TimeDistributed(feature_extractor)(masked_inputs)
+    frame_inputs = Input((MAX_FRAMES, IMG_SIZE, IMG_SIZE, 1))
+    masked_inputs = Masking(mask_value=0)(frame_inputs)
 
-x = LSTM(128, dropout=0.5, return_sequences=True, return_state=False)(
-    features
-)
-x = LSTM(64, dropout=0.5, return_sequences=False, return_state=False)(
-    x
-)
+    features = TimeDistributed(feature_extractor)(masked_inputs)
 
-value = Reshape((1,64))(Dense(64, activation='tanh', name='value')(x))
-score = Dense(1, name='score')(x)
+    x = LSTM(128, dropout=0.5, return_sequences=True, return_state=False)(features)
+    x = LSTM(64, dropout=0.5, return_sequences=False, return_state=False)(x)
 
-video_processor = Model(frame_inputs, x, name='video_processor')
+    value = Reshape((1,64))(Dense(64, activation='tanh', name='value')(x))
+    score = Dense(1, name='score')(x)
 
-inputs = Input((MAX_SLICES, MAX_FRAMES, IMG_SIZE, IMG_SIZE, 1))
-masked_inputs = Masking(mask_value=0)(inputs)
+    video_processor = Model(frame_inputs, x, name='video_processor')
 
-video_features = TimeDistributed(video_processor, name='video_processor')(masked_inputs)
+    inputs = Input((MAX_SLICES, MAX_FRAMES, IMG_SIZE, IMG_SIZE, 1))
+    masked_inputs = Masking(mask_value=0)(inputs)
 
-values = TimeDistributed(Dense(64, activation='tanh'), name='value')(video_features)
-scores = TimeDistributed(Dense(1), name='score')(video_features)
-softmax_scores = keras.activations.softmax(scores, axis=-2)
+    video_features = TimeDistributed(video_processor, name='video_processor')(masked_inputs)
 
-x = Multiply()([values, softmax_scores])
-x = Lambda(lambda v: K.sum(v, axis=1))(x)
-x = Dropout(0.5)(x)
-out = Dense(1, activation='sigmoid')(x)
+    values = TimeDistributed(Dense(64, activation='tanh'), name='value')(video_features)
+    scores = TimeDistributed(Dense(1), name='score')(video_features)
+    softmax_scores = keras.activations.softmax(scores, axis=-2)
 
-final_model = Model(inputs, out, name='classify')
+    x = Multiply()([values, softmax_scores])
+    x = Lambda(lambda v: K.sum(v, axis=1))(x)
+    x = Dropout(0.5)(x)
+    out = Dense(1, activation='sigmoid')(x)
 
-"""# Prediction
+    final_model = Model(inputs, out, name='classify')
 
-### Load video
-"""
+    """# Prediction
 
-!gdown --id 12VXCNPpvgzqJbqXQ9CZuklryqQOzvf74
+    ### Load video
+    """
 
-!gdown --id 1wSZzh-42Jho2xyyfqJ27EDCcX4Nf-ccz
+    path = './input/11slice.avi'
 
-path = 'test.avi'
+    model = keras.models.load_model('./pretrained_model/check_col_num.h5')
 
-model = keras.models.load_model('check_col_num.h5')
+    input = np.zeros((12,30,160,160,1))
 
-input = np.zeros((12,30,160,160,1))
-
-cap = cv2.VideoCapture(path)
-ret, frame = cap.read()
-frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-frame = cv2.resize(frame,(64,48))
-frame = frame[None,...,None]
-col_check = int(model.predict(frame)[0] < 0.5)
-
-frame_num = 0
-cap = cv2.VideoCapture(path)
-while(cap.isOpened()):
+    cap = cv2.VideoCapture(path)
     ret, frame = cap.read()
-    if not ret:
-        break
     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    frame = cv2.resize(frame,(64,48))
+    frame = frame[None,...,None]
+    col_check = int(model.predict(frame)[0] < 0.5)
 
-    h = 160
-    w = 128 if col_check else 160
-    for i in range(3):
-        for j in range(4 + col_check):
-            slice_num = i*(4 + col_check)+j
-            if slice_num >= 12:
-                break
-            x = j*w
-            y = i*h
-           
-            croped_frame = frame[y:y+h, x:x+w]
-            if croped_frame.sum() == 0:
-                break
-            if col_check:
-                croped_frame = np.pad(croped_frame, ((0,0),(16,16)), 'constant', constant_values=0)
-            
-            input[slice_num,frame_num] = croped_frame[...,None]
-    frame_num += 1
-    if frame_num >= 30:
-        break
+    frame_num = 0
+    cap = cv2.VideoCapture(path)
+    while(cap.isOpened()):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-input = input[None,...]
+        h = 160
+        w = 128 if col_check else 160
+        for i in range(3):
+            for j in range(4 + col_check):
+                slice_num = i*(4 + col_check)+j
+                if slice_num >= 12:
+                    break
+                x = j*w
+                y = i*h
 
-"""### Predict"""
+                croped_frame = frame[y:y+h, x:x+w]
+                if croped_frame.sum() == 0:
+                    break
+                if col_check:
+                    croped_frame = np.pad(croped_frame, ((0,0),(16,16)), 'constant', constant_values=0)
+                
+                input[slice_num,frame_num] = croped_frame[...,None]
+        frame_num += 1
+        if frame_num >= 30:
+            break
 
-!gdown --id 1xpndiIiahOZZvZfCMEnpdNS3mcObc1Xu
+    input = input[None,...]
 
-final_model.load_weights('classify5.h5')
+    """### Predict"""
 
-final_model.predict(input)
+    final_model.load_weights('./pretrained_model/classify5.h5')
+
+    res = final_model.predict(input)
+
+    return res[0][0]
